@@ -6,11 +6,10 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_openai import OpenAIEmbeddings
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
 
 from dotenv import load_dotenv
-
-MODEL = "gpt-4.1-nano"
 
 DB_NAME = str(Path(__file__).parent.parent / "vector_db")
 KNOWLEDGE_BASE = str(Path(__file__).parent.parent / "knowledge-base")
@@ -19,7 +18,8 @@ KNOWLEDGE_BASE = str(Path(__file__).parent.parent / "knowledge-base")
 
 load_dotenv(override=True)
 
-embeddings = OpenAIEmbeddings(model="text-embedding-3-large")
+#embeddings = OpenAIEmbeddings(model="text-embedding-3-large")
+embeddings = GoogleGenerativeAIEmbeddings(model="gemini-embedding-001")
 
 
 def fetch_documents():
