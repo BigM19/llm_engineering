@@ -1,3 +1,5 @@
+import os
+
 from openai import OpenAI
 from dotenv import load_dotenv
 from chromadb import PersistentClient
@@ -9,17 +11,19 @@ from tenacity import retry, wait_exponential
 
 load_dotenv(override=True)
 
-# MODEL = "openai/gpt-4.1-nano"
-MODEL = "groq/openai/gpt-oss-120b"
+MODEL = "gemini-2.5-flash-lite"
+# MODEL = "groq/openai/gpt-oss-120b"
+BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
+API_KEY = os.getenv("GEMINI_API_KEY","")
 DB_NAME = str(Path(__file__).parent.parent / "preprocessed_db")
 KNOWLEDGE_BASE_PATH = Path(__file__).parent.parent / "knowledge-base"
 SUMMARIES_PATH = Path(__file__).parent.parent / "summaries"
 
 collection_name = "docs"
-embedding_model = "text-embedding-3-large"
+embedding_model = "gemini-embedding-001"
 wait = wait_exponential(multiplier=1, min=10, max=240)
 
-openai = OpenAI()
+gemini = OpenAI(base_url=BASE_URL, api_key=API_KEY)
 
 chroma = PersistentClient(path=DB_NAME)
 collection = chroma.get_or_create_collection(collection_name)
@@ -51,14 +55,17 @@ class RankOrder(BaseModel):
 
 
 @retry(wait=wait)
-def rerank(question, chunks):
+def rerank(question, chunks, k=10):
     system_prompt = """
 You are a document re-ranker.
 You are provided with a question and a list of relevant chunks of text from a query of a knowledge base.
 The chunks are provided in the order they were retrieved; this should be approximately ordered by relevance, but you may be able to improve on that.
 You must rank order the provided chunks by relevance to the question, with the most relevant chunk first.
 Reply only with the list of ranked chunk ids, nothing else. Include all the chunk ids you are provided with, reranked.
+There are exactly {k} chunks. You MUST return a list containing all {k} chunk IDs. Do not omit any ID, even if you think the chunk is not relevant.
+If you return fewer than {k} IDs, the system will fail.
 """
+    system_prompt = system_prompt.format(k=k)
     user_prompt = f"The user has asked the following question:\n\n{question}\n\nOrder all the chunks of text by relevance to the question, from most relevant to least relevant. Include all the chunk ids you are provided with, reranked.\n\n"
     user_prompt += "Here are the chunks:\n\n"
     for index, chunk in enumerate(chunks):
@@ -68,9 +75,8 @@ Reply only with the list of ranked chunk ids, nothing else. Include all the chun
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
     ]
-    response = completion(model=MODEL, messages=messages, response_format=RankOrder)
-    reply = response.choices[0].message.content
-    order = RankOrder.model_validate_json(reply).order
+    response = gemini.chat.completions.parse(model=MODEL, messages=messages, response_format=RankOrder)
+    order = response.choices[0].message.parsed.order
     return [chunks[i - 1] for i in order]
 
 
@@ -89,21 +95,22 @@ def make_rag_messages(question, history, chunks):
 @retry(wait=wait)
 def rewrite_query(question, history=[]):
     """Rewrite the user's question to be a more specific question that is more likely to surface relevant content in the Knowledge Base."""
-    message = f"""
+    system_prompt = """
 You are in a conversation with a user, answering questions about the company Insurellm.
 You are about to look up information in a Knowledge Base to answer the user's question.
 
-This is the history of your conversation so far with the user:
-{history}
-
-And this is the user's current question:
-{question}
-
-Respond only with a short, refined question that you will use to search the Knowledge Base.
+Respond only with a single, refined question that you will use to search the Knowledge Base.
 It should be a VERY short specific question most likely to surface content. Focus on the question details.
-IMPORTANT: Respond ONLY with the precise knowledgebase query, nothing else.
+Don't mention the company name unless it's a general question about the company.
+IMPORTANT: Respond ONLY with the knowledgebase query, nothing else.
 """
-    response = completion(model=MODEL, messages=[{"role": "system", "content": message}])
+
+    user_prompt = f"""The user has asked the following question:\n\n{question}\n\n
+    Here is the history of your conversation so far with the user:\n\n{history}\n\n"""
+    messages = [{"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}]
+
+    response = gemini.chat.completions.create(model=MODEL, messages=messages)
     return response.choices[0].message.content
 
 
@@ -117,7 +124,7 @@ def merge_chunks(chunks, reranked):
 
 
 def fetch_context_unranked(question):
-    query = openai.embeddings.create(model=embedding_model, input=[question]).data[0].embedding
+    query = gemini.embeddings.create(model=embedding_model, input=[question]).data[0].embedding
     results = collection.query(query_embeddings=[query], n_results=RETRIEVAL_K)
     chunks = []
     for result in zip(results["documents"][0], results["metadatas"][0]):
@@ -141,5 +148,5 @@ def answer_question(question: str, history: list[dict] = []) -> tuple[str, list]
     """
     chunks = fetch_context(question)
     messages = make_rag_messages(question, history, chunks)
-    response = completion(model=MODEL, messages=messages)
+    response = gemini.chat.completions.create(model=MODEL, messages=messages)
     return response.choices[0].message.content, chunks

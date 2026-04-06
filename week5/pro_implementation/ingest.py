@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -11,19 +12,21 @@ from tenacity import retry, wait_exponential
 
 load_dotenv(override=True)
 
-MODEL = "openai/gpt-4.1-nano"
+MODEL = "gemini-2.5-flash-lite"
+BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
+API_KEY = os.getenv("GEMINI_API_KEY","")
 
 DB_NAME = str(Path(__file__).parent.parent / "preprocessed_db")
 collection_name = "docs"
-embedding_model = "text-embedding-3-large"
+embedding_model = "gemini-embedding-001"
 KNOWLEDGE_BASE_PATH = Path(__file__).parent.parent / "knowledge-base"
-AVERAGE_CHUNK_SIZE = 100
+AVERAGE_CHUNK_SIZE = 500
+
+gemini = OpenAI(base_url=BASE_URL, api_key=API_KEY)
+
 wait = wait_exponential(multiplier=1, min=10, max=240)
 
-
 WORKERS = 3
-
-openai = OpenAI()
 
 
 class Result(BaseModel):
@@ -103,9 +106,8 @@ def make_messages(document):
 @retry(wait=wait)
 def process_document(document):
     messages = make_messages(document)
-    response = completion(model=MODEL, messages=messages, response_format=Chunks)
-    reply = response.choices[0].message.content
-    doc_as_chunks = Chunks.model_validate_json(reply).chunks
+    response = gemini.chat.completions.parse(model=MODEL, messages=messages, response_format=Chunks)
+    doc_as_chunks = response.choices[0].message.parsed.chunks
     return [chunk.as_result(document) for chunk in doc_as_chunks]
 
 
@@ -121,23 +123,53 @@ def create_chunks(documents):
     return chunks
 
 
+import time
+
 def create_embeddings(chunks):
     chroma = PersistentClient(path=DB_NAME)
     if collection_name in [c.name for c in chroma.list_collections()]:
         chroma.delete_collection(collection_name)
 
     texts = [chunk.page_content for chunk in chunks]
-    emb = openai.embeddings.create(model=embedding_model, input=texts).data
-    vectors = [e.embedding for e in emb]
-
-    collection = chroma.get_or_create_collection(collection_name)
-
-    ids = [str(i) for i in range(len(chunks))]
     metas = [chunk.metadata for chunk in chunks]
+    ids = [str(i) for i in range(len(chunks))]
+    
+    # --- NEW BATCHING LOGIC ---
+    BATCH_SIZE = 100
+    all_vectors = []
 
-    collection.add(ids=ids, embeddings=vectors, documents=texts, metadatas=metas)
+    print(f"Total chunks to embed: {len(texts)}")
+
+    for i in range(0, len(texts), BATCH_SIZE):
+        batch_texts = texts[i : i + BATCH_SIZE]
+        
+        print(f"Processing batch {i//BATCH_SIZE + 1}...")
+        
+        # Call Gemini API for the current batch
+        response = gemini.embeddings.create(
+            model=embedding_model, 
+            input=batch_texts
+        )
+        
+        # Extract embeddings and add to our master list
+        batch_vectors = [item.embedding for item in response.data]
+        all_vectors.extend(batch_vectors)
+        
+        # Optional: Small sleep to avoid Rate Limits (429 errors)
+        time.sleep(0.5) 
+    # ---------------------------
+
+    # Create the collection and add all data at once
+    collection = chroma.get_or_create_collection(collection_name)
+    
+    collection.add(
+        ids=ids, 
+        embeddings=all_vectors, 
+        documents=texts, 
+        metadatas=metas
+    )
+    
     print(f"Vectorstore created with {collection.count()} documents")
-
 
 if __name__ == "__main__":
     documents = fetch_documents()

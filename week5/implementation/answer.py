@@ -67,8 +67,8 @@ def answer_question(question: str, history: list[dict] = []) -> tuple[str, list[
     """
     Answer the given question with RAG; return the answer and the context documents.
     """
-    query = create_search_query(question, history)
-    docs = fetch_context(query)
+    #query = create_search_query(question, history)
+    docs = fetch_context(question)
     context = "\n\n".join(doc.page_content for doc in docs)
     system_prompt = SYSTEM_PROMPT_ANSWER.format(context=context)
     messages = [SystemMessage(content=system_prompt)]

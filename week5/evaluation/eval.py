@@ -1,16 +1,18 @@
 import sys
 import math
+import time
 from pydantic import BaseModel, Field
-from litellm import completion
+from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 from dotenv import load_dotenv
+import time
 
 from evaluation.test import TestQuestion, load_tests
-from implementation.answer import answer_question, fetch_context
+from pro_implementation.answer import answer_question, fetch_context
 
 
 load_dotenv(override=True)
 
-MODEL = "gpt-4.1-nano"
+MODEL = "gemini-2.5-flash-lite"
 db_name = "vector_db"
 
 
@@ -153,9 +155,9 @@ Provide detailed feedback and scores from 1 (very poor) to 5 (ideal) for each di
     ]
 
     # Call LLM judge with structured outputs (async)
-    judge_response = completion(model=MODEL, messages=judge_messages, response_format=AnswerEval)
-
-    answer_eval = AnswerEval.model_validate_json(judge_response.choices[0].message.content)
+    model = ChatGoogleGenerativeAI(model=MODEL)
+    structured_model = model.with_structured_output(AnswerEval)
+    answer_eval = structured_model.invoke(judge_messages)
 
     return answer_eval, generated_answer, retrieved_docs
 
@@ -175,6 +177,7 @@ def evaluate_all_answers():
     tests = load_tests()
     total_tests = len(tests)
     for index, test in enumerate(tests):
+        time.sleep(1)
         result = evaluate_answer(test)[0]
         progress = (index + 1) / total_tests
         yield test, result, progress
